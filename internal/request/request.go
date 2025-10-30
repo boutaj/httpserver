@@ -1,9 +1,9 @@
 package request
 
 import (
+	"bytes"
 	"errors"
 	"io"
-	"strings"
 )
 
 type parserState string
@@ -25,25 +25,25 @@ type RequestLine struct {
 
 func (r *Request) parse(data []byte) (int, error) {
 	read := 0
-outer:
-	for {
-		switch r.state {
-			case parserInit:
-				rl, n, err := parseRequestLine(data[read:])
-				if err != nil {
-					return 0, err
-				}
-				if n == 0 {
-					break outer
-				}
-				r.RequestLine = *rl
-				read += n
+	outer:
+		for {
+			switch r.state {
+				case parserInit:
+					rl, n, err := parseRequestLine(data[read:])
+					if err != nil {
+						return 0, err
+					}
+					if n == 0 {
+						break outer
+					}
+					r.RequestLine = *rl
+					read += n
 
-				r.state = parserDone
-			case parserDone:
-				break outer
+					r.state = parserDone
+				case parserDone:
+					break outer
+			}
 		}
-	}
 	return read, nil
 }
 
@@ -70,28 +70,27 @@ func RequestFromReader(reader io.Reader) (*Request, error) {
 }
 
 func parseRequestLine(line []byte) (*RequestLine, int, error) {
-	sLine := string(line)
-	index := strings.Index(sLine, "\r\n")
+	index := bytes.Index(line, []byte("\r\n"))
 
 	if index == -1 {
 		return nil, 0, nil
 	}
 
-	rqline := sLine[:index]
-	rest := index+2
+	rqline := line[:index]
+	rest := index + 2
 
-	parts := strings.Split(string(rqline), " ")
+	parts := bytes.Split(rqline, []byte(" "))
 	if len(parts) != 3 {
 		return nil, 0, errors.New("invalid request line format")
 	}
 	method, target, version := parts[0], parts[1], parts[2]
-	if !strings.HasPrefix(version, "HTTP/") {
-		return nil, 0, errors.New("Invalid HTTP version : " + version)
+	if !bytes.HasPrefix(version, []byte("HTTP/")) {
+		return nil, 0, errors.New("Invalid HTTP version : " + string(version))
 	}
 
 	return &RequestLine{
-		Method:        method,
-		RequestTarget: target,
-		HttpVersion:   strings.TrimPrefix(version, "HTTP/"),
+		Method:        string(method),
+		RequestTarget: string(target),
+		HttpVersion:   string(version[len("HTTP/"):]),
 	}, rest, nil
 }
