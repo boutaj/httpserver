@@ -3,36 +3,102 @@ package headers
 import (
 	"bytes"
 	"errors"
-	"regexp"
+	"fmt"
+	"strings"
 )
 
-type Headers map[string]string
+var (
+	crlf                  = []byte("\r\n")
+	errMalformedHeader    = errors.New("malformed header line")
+	errInvalidHeaderToken = errors.New("invalid header name")
+)
 
-func NewHeaders() (Headers) {
-	header := Headers{}
-	return header
+type Headers struct {
+	headers map[string]string
 }
 
-func (h Headers) Parse(data []byte) (int, bool, error) {
-	CRLF  := []byte("\r\n")
-	index := bytes.Index(data, CRLF)
+func NewHeaders() *Headers {
+	return &Headers{
+		headers: map[string]string{},
+	}
+}
 
+func (h *Headers) Get(name string) string {
+	return h.headers[strings.ToLower(name)]
+}
+
+func (h *Headers) Set(name, value string) {
+	h.headers[strings.ToLower(name)] = value
+}
+
+func (h *Headers) Parse(data []byte) (int, bool, error) {
+	index := bytes.Index(data, crlf)
 	if index == -1 {
 		return 0, false, nil
 	}
 
 	if index == 0 {
-		return len(CRLF), true, nil
+		return len(crlf), true, nil
 	}
 
-	headerRe := regexp.MustCompile(`^[ \t]*([^\s:]+):[ \t]*(.*?)\s*$`)
-	line     := bytes.Trim(data[:index], " ")
-	parts    := headerRe.FindSubmatch(line)
-	if parts == nil {
-		return 0, false, errors.New("malformed header line")
+	line := data[:index]
+	name, value, err := parseHeaderLine(line)
+	if err != nil {
+		return 0, false, err
 	}
 
-	h[string(parts[1])] = string(parts[2])
+	h.Set(name, value)
+	return index + len(crlf), false, nil
+}
 
-	return index + len(CRLF), false, nil
+func parseHeaderLine(line []byte) (string, string, error) {
+	colon := bytes.IndexByte(line, ':')
+	if colon <= 0 {
+		return "", "", errMalformedHeader
+	}
+
+	name := line[:colon]
+	if !isValidHeaderName(name) {
+		return "", "", fmt.Errorf("%w: %q", errInvalidHeaderToken, name)
+	}
+
+	value := bytes.TrimLeft(line[colon+1:], " \t")
+	value = bytes.TrimRight(value, " \t")
+
+	return string(name), string(value), nil
+}
+
+func isValidHeaderName(name []byte) bool {
+	if len(name) == 0 {
+		return false
+	}
+
+	for _, b := range name {
+		if b > 127 {
+			return false
+		}
+		if !isTChar(b) {
+			return false
+		}
+	}
+
+	return true
+}
+
+func isTChar(b byte) bool {
+	switch {
+	case b >= '0' && b <= '9':
+		return true
+	case b >= 'A' && b <= 'Z':
+		return true
+	case b >= 'a' && b <= 'z':
+		return true
+	}
+
+	switch b {
+	case '!', '#', '$', '%', '&', '\'', '*', '+', '-', '.', '^', '_', '`', '|', '~':
+		return true
+	default:
+		return false
+	}
 }
