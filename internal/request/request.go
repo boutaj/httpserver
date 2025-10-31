@@ -74,10 +74,7 @@ func RequestFromReader(reader io.Reader) (*Request, error) {
 			if len(buf) >= maxRequestLineBytes {
 				return nil, errRequestLineTooLarge
 			}
-			nextSize := len(buf) * 2
-			if nextSize > maxRequestLineBytes {
-				nextSize = maxRequestLineBytes
-			}
+			nextSize := min(len(buf) * 2, maxRequestLineBytes)
 			grown := make([]byte, nextSize)
 			copy(grown, buf[:bufLen])
 			buf = grown
