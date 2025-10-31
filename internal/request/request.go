@@ -3,18 +3,34 @@ package request
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"io"
 )
 
-type parserState string
+type parserState int
+
 const (
-	parserInit parserState = "initialized"
-	parserDone parserState = "done"
+	parserInit parserState = iota
+	parserDone
+)
+
+const (
+	initialBufferSize   = 1024
+	maxRequestLineBytes = 8192
+	httpVersionPrefix   = "HTTP/"
+)
+
+var (
+	crlf                   = []byte("\r\n")
+	errRequestLineFormat   = errors.New("invalid request line format")
+	errInvalidHTTPVersion  = errors.New("invalid http version")
+	errInvalidMethodToken  = errors.New("invalid method token")
+	errRequestLineTooLarge = errors.New("request line exceeds maximum length")
 )
 
 type Request struct {
 	RequestLine RequestLine
-	state parserState
+	state       parserState
 }
 
 type RequestLine struct {
@@ -24,73 +40,165 @@ type RequestLine struct {
 }
 
 func (r *Request) parse(data []byte) (int, error) {
-	read := 0
-	outer:
-		for {
-			switch r.state {
-				case parserInit:
-					rl, n, err := parseRequestLine(data[read:])
-					if err != nil {
-						return 0, err
-					}
-					if n == 0 {
-						break outer
-					}
-					r.RequestLine = *rl
-					read += n
+	if r.state == parserDone {
+		return 0, nil
+	}
 
-					r.state = parserDone
-				case parserDone:
-					break outer
-			}
+	line, consumed := readLine(data)
+	if consumed == 0 {
+		if len(data) >= maxRequestLineBytes {
+			return 0, errRequestLineTooLarge
 		}
-	return read, nil
+		return 0, nil
+	}
+
+	requestLine, err := parseRequestLine(line)
+	if err != nil {
+		return 0, err
+	}
+
+	r.RequestLine = requestLine
+	r.state = parserDone
+
+	return consumed, nil
 }
 
 func RequestFromReader(reader io.Reader) (*Request, error) {
 	request := &Request{state: parserInit}
 
-	buf := make([]byte, 1024)
+	buf := make([]byte, initialBufferSize)
 	bufLen := 0
+
 	for request.state != parserDone {
+		if bufLen == len(buf) {
+			if len(buf) >= maxRequestLineBytes {
+				return nil, errRequestLineTooLarge
+			}
+			nextSize := len(buf) * 2
+			if nextSize > maxRequestLineBytes {
+				nextSize = maxRequestLineBytes
+			}
+			grown := make([]byte, nextSize)
+			copy(grown, buf[:bufLen])
+			buf = grown
+		}
+
 		n, err := reader.Read(buf[bufLen:])
+		if n > 0 {
+			bufLen += n
+			consumed, parseErr := request.parse(buf[:bufLen])
+			if parseErr != nil {
+				return nil, parseErr
+			}
+			if consumed > 0 {
+				copy(buf, buf[consumed:bufLen])
+				bufLen -= consumed
+			}
+		}
+
 		if err != nil {
+			if err == io.EOF {
+				if request.state != parserDone {
+					return nil, io.ErrUnexpectedEOF
+				}
+				break
+			}
 			return nil, err
 		}
-		bufLen += n
-		readN, err := request.parse(buf[:bufLen])
-		if err != nil {
-			return nil, err
-		}
-		copy(buf, buf[readN:bufLen])
-		bufLen -= readN
 	}
 
-	return request, nil	
+	return request, nil
 }
 
-func parseRequestLine(line []byte) (*RequestLine, int, error) {
-	index := bytes.Index(line, []byte("\r\n"))
-
-	if index == -1 {
-		return nil, 0, nil
+func parseRequestLine(line []byte) (RequestLine, error) {
+	fields := bytes.Fields(line)
+	if len(fields) != 3 {
+		return RequestLine{}, errRequestLineFormat
 	}
 
-	rqline := line[:index]
-	rest := index + 2
-
-	parts := bytes.Split(rqline, []byte(" "))
-	if len(parts) != 3 {
-		return nil, 0, errors.New("invalid request line format")
-	}
-	method, target, version := parts[0], parts[1], parts[2]
-	if !bytes.HasPrefix(version, []byte("HTTP/")) {
-		return nil, 0, errors.New("Invalid HTTP version : " + string(version))
+	method := fields[0]
+	if !isToken(method) {
+		return RequestLine{}, fmt.Errorf("%w: %q", errInvalidMethodToken, method)
 	}
 
-	return &RequestLine{
+	version := fields[2]
+	if !bytes.HasPrefix(version, []byte(httpVersionPrefix)) {
+		return RequestLine{}, fmt.Errorf("%w: %q", errInvalidHTTPVersion, version)
+	}
+
+	versionNumber := version[len(httpVersionPrefix):]
+	if !isValidHTTPVersion(versionNumber) {
+		return RequestLine{}, fmt.Errorf("%w: %q", errInvalidHTTPVersion, version)
+	}
+
+	return RequestLine{
 		Method:        string(method),
-		RequestTarget: string(target),
-		HttpVersion:   string(version[len("HTTP/"):]),
-	}, rest, nil
+		RequestTarget: string(fields[1]),
+		HttpVersion:   string(versionNumber),
+	}, nil
+}
+
+func readLine(data []byte) ([]byte, int) {
+	index := bytes.Index(data, crlf)
+	if index == -1 {
+		return nil, 0
+	}
+	return data[:index], index + len(crlf)
+}
+
+func isToken(token []byte) bool {
+	if len(token) == 0 {
+		return false
+	}
+
+	for _, b := range token {
+		if b > 127 {
+			return false
+		}
+		if !isTChar(b) {
+			return false
+		}
+	}
+
+	return true
+}
+
+func isValidHTTPVersion(version []byte) bool {
+	if len(version) == 0 {
+		return false
+	}
+
+	dotSeen := false
+	for _, b := range version {
+		if b == '.' {
+			if dotSeen {
+				return false
+			}
+			dotSeen = true
+			continue
+		}
+		if b < '0' || b > '9' {
+			return false
+		}
+	}
+
+	return dotSeen
+}
+
+func isTChar(b byte) bool {
+	switch {
+	case b >= '0' && b <= '9':
+		return true
+	case b >= 'A' && b <= 'Z':
+		return true
+	case b >= 'a' && b <= 'z':
+		return true
+	}
+
+	switch b {
+	case '!', '#', '$', '%', '&', '\'', '*', '+', '-', '.', '^', '_', '`', '|', '~':
+		return true
+	default:
+		return false
+	}
 }
